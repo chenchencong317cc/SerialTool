@@ -1,0 +1,6 @@
+# 运行依赖
+PyQt5>=5.15
+pyserial>=3.5
+
+# 打包依赖（仅生成 exe 时需要）
+pyinstaller>=6.0
