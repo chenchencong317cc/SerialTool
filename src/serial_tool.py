@@ -1209,14 +1209,26 @@ class MainWindow(QMainWindow):
         self.setWindowFlag(Qt.WindowStaysOnTopHint, checked)
         self.show()
 
+    def _sync_extend_splitter(self, checked):
+        if checked:
+            total = max(1, self.splitter.width())
+            panel = min(PANEL_WIDTH, max(420, total // 3))
+            self.splitter.setSizes([max(1, total - panel), panel])
+        else:
+            self.splitter.setSizes([max(1, self.splitter.width()), 0])
+
     def _toggle_extend(self, checked):
         self.multi_panel.setVisible(checked)
         self.btn_extend.setText("隐藏" if checked else "扩展")
+        if self.isMaximized() or self.isFullScreen():
+            QTimer.singleShot(0, lambda c=checked: self._sync_extend_splitter(c))
+            return
         dh = self.height()
         if checked:
             self.resize(self.width() + PANEL_WIDTH, dh)
         else:
             self.resize(max(500, self.width() - PANEL_WIDTH), dh)
+        QTimer.singleShot(0, lambda c=checked: self._sync_extend_splitter(c))
 
     def _update_counters(self):
         self.st_s.setText(f"S:{self.tx_count}")

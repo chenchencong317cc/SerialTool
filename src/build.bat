@@ -22,10 +22,12 @@ pyinstaller --noconfirm --clean --onefile --windowed ^
     --specpath "%HERE%..\build" ^
     "%HERE%serial_tool.py"
 
+set "RC=%ERRORLEVEL%"
 echo.
-if exist "%HERE%..\exe\SerialTool.exe" (
+if "%RC%"=="0" if exist "%HERE%..\exe\SerialTool.exe" (
     echo [OK] Built: %HERE%..\exe\SerialTool.exe
 ) else (
     echo [FAIL] Build failed.
+    exit /b %RC%
 )
 pause
