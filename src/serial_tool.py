@@ -197,7 +197,7 @@ class SetupDialog(QDialog):
 # 多字符串面板（仿 SSCOM 扩展面板）
 # ----------------------------------------------------------------------
 class MultiStringPanel(QGroupBox):
-    """99 条字符串：HEX 勾选 / 内容 / 注释(点击发送，双击内容改注释) / 顺序 / 延时"""
+    """99 条字符串：HEX 勾选 / 内容 / 注释(点击发送，双击内容或注释按钮改注释) / 顺序 / 延时"""
 
     def __init__(self, sender, parent=None):
         super().__init__("多条字符串发送", parent)
@@ -229,6 +229,7 @@ class MultiStringPanel(QGroupBox):
         grid = QGridLayout(container)
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(1)
+        grid.setHorizontalSpacing(6)     # HEX 与字符串之间留出间距
         for col, t in enumerate(("HEX", "字符串(双击改注释)", "点击发送", "顺序", "延时ms")):
             lab = QLabel(t)
             lab.setStyleSheet("color:#555;")
@@ -241,7 +242,9 @@ class MultiStringPanel(QGroupBox):
             edit.installEventFilter(self)
             btn = QPushButton(f"{r}无注释")
             btn.setStyleSheet("text-align:left;color:#7a5c00;")
-            btn.clicked.connect(lambda _=False, idx=i: self.send_row(idx))
+            btn.setToolTip("单击发送该条；双击编辑注释")
+            btn.installEventFilter(self)
+            # 单击/双击由 eventFilter 区分（单击延迟 250ms 发送，双击只编辑注释）
             sp_order = QSpinBox()
             sp_order.setRange(0, MULTI_COUNT)
             sp_order.setToolTip("循环顺序，0=不参与循环")
@@ -257,7 +260,7 @@ class MultiStringPanel(QGroupBox):
             grid.addWidget(sp_delay, r, 4)
             self.rows.append({
                 "hex": hex_cb, "edit": edit, "btn": btn,
-                "order": sp_order, "delay": sp_delay,
+                "order": sp_order, "delay": sp_delay, "comment": "",
             })
         grid.setColumnStretch(1, 1)
 
@@ -272,16 +275,67 @@ class MultiStringPanel(QGroupBox):
         self._cycle_list = []
         self._cycle_pos = 0
 
-    # -- 双击字符串编辑注释 --
+        # 注释按钮的单击/双击区分（单击延迟发送，双击编辑注释）
+        self._click_timer = QTimer(self)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.timeout.connect(self._fire_pending_send)
+        self._pending_row = None
+
+    # -- 注释 --
+    def set_comment(self, i, comment: str):
+        """设置第 i 条注释；空/占位文本（'N无注释'）表示无注释。"""
+        if re.fullmatch(r"\d+无注释", comment):
+            comment = ""
+        row = self.rows[i]
+        row["comment"] = comment
+        row["btn"].setText(comment or f"{i + 1}无注释")
+
+    def _open_comment_editor(self, i):
+        row = self.rows[i]
+        text, ok = QInputDialog.getText(
+            self, "编辑注释", f"第 {i + 1} 条注释：",
+            text=row["comment"])
+        if ok:
+            self.set_comment(i, text.strip())
+
+    def _fire_pending_send(self):
+        if self._pending_row is not None:
+            i, self._pending_row = self._pending_row, None
+            self.send_row(i)
+
+    # -- 双击字符串/注释按钮编辑注释；单击注释按钮延迟发送（区分双击） --
     def eventFilter(self, obj, ev):
         if ev.type() == QEvent.MouseButtonDblClick:
             for i, row in enumerate(self.rows):
-                if row["edit"] is obj:
-                    text, ok = QInputDialog.getText(
-                        self, "编辑注释", f"第 {i + 1} 条注释：",
-                        text=row["btn"].text())
-                    if ok and text.strip():
-                        row["btn"].setText(text.strip())
+                if row["edit"] is obj or row["btn"] is obj:
+                    if self._pending_row == i:
+                        self._click_timer.stop()
+                        self._pending_row = None
+                    self._open_comment_editor(i)
+                    return True
+        if ev.type() == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
+            for i, row in enumerate(self.rows):
+                if row["btn"] is obj:
+                    if self._pending_row is not None:
+                        self._click_timer.stop()
+                        if self._pending_row == i:
+                            # 同一按钮再次快速按下 → 视为双击，只编辑注释
+                            self._pending_row = None
+                            self._open_comment_editor(i)
+                            return True
+                        self._fire_pending_send()   # 单击了另一条：先发出上一条
+                    self._pending_row = i
+                    self._click_timer.start()
+                    return True
+        # 键盘（回车/空格）激活按钮 → 立即发送
+        if (ev.type() == QEvent.KeyPress and
+                ev.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space)):
+            for i, row in enumerate(self.rows):
+                if row["btn"] is obj:
+                    if self._pending_row is not None:
+                        self._click_timer.stop()
+                        self._fire_pending_send()
+                    self.send_row(i)
                     return True
         return super().eventFilter(obj, ev)
 
@@ -290,7 +344,7 @@ class MultiStringPanel(QGroupBox):
         text = row["edit"].text()
         if not text:
             return False
-        return self._sender(row["hex"].isChecked(), text)
+        return self._sender(row["hex"].isChecked(), text, add_newline=True)
 
     # -- 循环发送：按“顺序”排序，逐条发送，每条后等待其“延时” --
     def _on_cycle_toggled(self, checked):
@@ -313,10 +367,15 @@ class MultiStringPanel(QGroupBox):
             return
         idx = self._cycle_list[self._cycle_pos]
         self._cycle_pos = (self._cycle_pos + 1) % len(self._cycle_list)
+        row = self.rows[idx]
+        if not row["edit"].text():
+            # 内容为空的条跳过，等待其延时后继续
+            self.cycle_timer.start(row["delay"].value())
+            return
         if self.send_row(idx):
-            self.cycle_timer.start(self.rows[idx]["delay"].value())
+            self.cycle_timer.start(row["delay"].value())
         else:
-            # 发送失败（如串口未打开）时停止循环
+            # 发送失败（如串口未打开、HEX 格式错误）时停止循环
             self.cb_cycle.setChecked(False)
 
     def stop_cycle(self):
@@ -346,7 +405,8 @@ class MultiStringPanel(QGroupBox):
                 idx = int(key[1:]) - 100          # N101 -> 第1条
                 parts = val.split(",")
                 if len(parts) >= 3:
-                    meta[idx] = parts
+                    # 注释可能含逗号：取首段为顺序、末段为延时、中间为注释
+                    meta[idx] = (parts[0], ",".join(parts[1:-1]), parts[-1])
             elif key.startswith("N") and key[1:].isdigit():
                 idx = int(key[1:])
                 parts = val.split(",", 1)
@@ -366,8 +426,7 @@ class MultiStringPanel(QGroupBox):
                     row["order"].setValue(int(order))
                 except ValueError:
                     pass
-                if comment:
-                    row["btn"].setText(comment)
+                self.set_comment(idx - 1, comment)
                 try:
                     row["delay"].setValue(max(20, int(delay)))
                 except ValueError:
@@ -382,7 +441,7 @@ class MultiStringPanel(QGroupBox):
         lines = [";SerialTool 多字符串导出（兼容 SSCOM 格式）"]
         for i, row in enumerate(self.rows):
             idx = i + 1
-            comment = row["btn"].text()
+            comment = row["comment"]
             lines.append(f"N{100 + idx}={row['order'].value()},{comment},{row['delay'].value()}")
             flag = "H" if row["hex"].isChecked() else "A"
             lines.append(f"N{idx}={flag},{row['edit'].text()}")
@@ -397,12 +456,12 @@ class MultiStringPanel(QGroupBox):
 
     def _show_help(self):
         QMessageBox.information(self, "多条帮助",
-                                "1. 点击右侧注释按钮发送该条字符串；\n"
-                                "2. 双击字符串输入框可修改注释；\n"
+                                "1. 单击注释按钮发送该条字符串（双击不会发送，用于编辑）；\n"
+                                "2. 双击字符串输入框或注释按钮可修改注释（清空即无注释）；\n"
                                 "3. 勾选 HEX 表示该条按十六进制发送；\n"
                                 "4. “顺序”>0 的条参与循环发送，按顺序号从小到大发送，\n"
                                 "   每条发送后等待其“延时”毫秒再发下一条；\n"
-                                "5. 发送内容会套用主界面的“加校验”设置。")
+                                "5. 发送内容会套用主界面的“加回车换行”和“加校验”设置。")
 
 
 # ----------------------------------------------------------------------
@@ -435,6 +494,7 @@ class MainWindow(QMainWindow):
 
         # 定时发送
         self.auto_timer = QTimer(self)
+        self.auto_timer.setTimerType(Qt.PreciseTimer)   # 10ms 级间隔也需要精确定时
         self.auto_timer.timeout.connect(self.send_main)
 
         # 文件发送
@@ -1218,16 +1278,9 @@ class MainWindow(QMainWindow):
             self.splitter.setSizes([max(1, self.splitter.width()), 0])
 
     def _toggle_extend(self, checked):
+        # 只显示/隐藏面板并调整分栏，不改变窗口尺寸
         self.multi_panel.setVisible(checked)
         self.btn_extend.setText("隐藏" if checked else "扩展")
-        if self.isMaximized() or self.isFullScreen():
-            QTimer.singleShot(0, lambda c=checked: self._sync_extend_splitter(c))
-            return
-        dh = self.height()
-        if checked:
-            self.resize(self.width() + PANEL_WIDTH, dh)
-        else:
-            self.resize(max(500, self.width() - PANEL_WIDTH), dh)
         QTimer.singleShot(0, lambda c=checked: self._sync_extend_splitter(c))
 
     def _update_counters(self):
@@ -1277,7 +1330,7 @@ class MainWindow(QMainWindow):
             s.setArrayIndex(i)
             s.setValue("hex", row["hex"].isChecked())
             s.setValue("text", row["edit"].text())
-            s.setValue("comment", row["btn"].text())
+            s.setValue("comment", row["comment"])
             s.setValue("order", row["order"].value())
             s.setValue("delay", row["delay"].value())
         s.endArray()
@@ -1329,9 +1382,7 @@ class MainWindow(QMainWindow):
             row = self.multi_panel.rows[i]
             row["hex"].setChecked(b("hex"))
             row["edit"].setText(s.value("text", ""))
-            comment = s.value("comment", "")
-            if comment:
-                row["btn"].setText(comment)
+            self.multi_panel.set_comment(i, s.value("comment", ""))
             row["order"].setValue(int(s.value("order", 0)))
             row["delay"].setValue(int(s.value("delay", 1000)))
         s.endArray()
