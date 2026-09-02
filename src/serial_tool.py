@@ -244,7 +244,7 @@ class MultiStringPanel(QGroupBox):
             btn.setStyleSheet("text-align:left;color:#7a5c00;")
             btn.setToolTip("单击发送该条；双击编辑注释")
             btn.installEventFilter(self)
-            # 单击/双击由 eventFilter 区分（单击延迟 250ms 发送，双击只编辑注释）
+            # 单击/双击由 eventFilter 区分（单击延迟一个“双击判定间隔”后发送，双击只编辑注释）
             sp_order = QSpinBox()
             sp_order.setRange(0, MULTI_COUNT)
             sp_order.setToolTip("循环顺序，0=不参与循环")
@@ -279,6 +279,9 @@ class MultiStringPanel(QGroupBox):
         self._click_timer = QTimer(self)
         self._click_timer.setSingleShot(True)
         self._click_timer.timeout.connect(self._fire_pending_send)
+        # 必须等到超过系统的“双击判定间隔”才发送：只要系统判定为双击，
+        # 第二击（MouseButtonDblClick）到达时取消计时，就不会发出数据
+        self._click_timer.setInterval(QApplication.doubleClickInterval() + 100)
         self._pending_row = None
 
     # -- 注释 --
